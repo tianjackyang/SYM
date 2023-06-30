@@ -86,6 +86,8 @@ extension Regex {
 
     // 0x19a8d8000 - 0x19a8f4fff libsystem_m.dylib arm64  <ee3277089d2b310c81263e5fbcbb3138> /usr/lib/system/libsystem_m.dylib
     static let image = try! Regex("\\s*(0[xX][A-Fa-f0-9]+)\\s+-\\s+\\w+\\s+([^\\s]+)\\s*(\\w+)\\s*<(.*)> (.*)")
+    
+    static let QTImage = try! Regex("\\s*(0[xX][A-Fa-f0-9]+)\\s+-\\s+\\w+\\s+\\+([^\\s]+)\\s*(\\w+)\\s*<(.*)> (.*)")
 
     // Thread 0:
     // Thread 0 Crashed:
@@ -110,6 +112,11 @@ extension Regex {
     static func image(_ binary: String, options: NSRegularExpression.Options = .anchorsMatchLines) -> Regex? {
         return try? Regex("\\s*(0[xX][A-Fa-f0-9]+)\\s+-\\s+\\w+\\s+(\(binary))\\s*(\\w+)\\s*<(.*)>", options: options)
     }
+    
+    // Image with specified binary
+    static func QTImage(_ binary: String, options: NSRegularExpression.Options = .anchorsMatchLines) -> Regex? {
+        return try? Regex("\\s*(0[xX][A-Fa-f0-9]+)\\s+-\\s+\\w+\\s+\\+(\(binary))\\s*(\\w+)\\s*<(.*)>", options: options)
+    }
 
     // UUID: E5B0A378-6816-3D90-86FD-2AEF15894A85
     static let uuid = try! Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", options: [.anchorsMatchLines, .caseInsensitive])
@@ -122,6 +129,49 @@ extension Regex {
 
     // Version:             521 (5.7.8)
     static let version = try! Regex("^Version:\\s*(.*)", options: .anchorsMatchLines)
+}
+
+struct QTParser: CrashParser {
+    static func match(_ content: String) -> Bool {
+        return content.contains("k_crash_ver")
+    }
+
+    func parse(_ content: String) -> Crash {
+        var crash = Crash(content)
+
+        let regexMap: RegexHelper.KeyValueRegexMap = [
+            \.appName: .process,
+            \.device: .hardware,
+            \.bundleID: .identifier,
+            \.osVersion: .osVersion,
+            \.appVersion: .version,
+        ]
+        RegexHelper.parseBaseInfo(content, crash: &crash, map: regexMap)
+
+        if let binary = crash.appName,
+           let imageRegex = Regex.QTImage(binary, options: []),
+           let captures = imageRegex.firstMatch(in: content)?.captures
+        {
+            crash.uuid = captures[4].uuidFormat()
+            crash.arch = captures[3]
+        }
+
+        RegexHelper.parseBinaries(content, crash: &crash, regex: .QTImage) { captures in
+            Binary(name: captures[2],
+                   uuid: captures[4].uuidFormat(),
+                   arch: captures[3],
+                   loadAddress: captures[1],
+                   path: captures[5])
+        }
+
+        // backtrace
+        RegexHelper.parseCrashedThreadRange(content, crash: &crash, regex: .threadCrashed)
+        RegexHelper.parseAppBacktrackRanges(content, crash: &crash) { binary in
+            Regex.frame(binary)
+        }
+
+        return crash
+    }
 }
 
 struct AppleParser: CrashParser {
@@ -389,6 +439,9 @@ extension Crash {
         }
         if FabricParser.match(content) {
             return FabricParser()
+        }
+        if QTParser.match(content) {
+            return QTParser()
         }
         return AppleParser()
     }
